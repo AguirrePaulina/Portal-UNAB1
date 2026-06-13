@@ -650,6 +650,113 @@ function abrirMateria(cod, cid) {
   else { new bootstrap.Modal(document.getElementById("modal-materia")).show(); }
 }
 
+/* ══════════════════════════════════════════════════════
+   MOTOR DE BÚSQUEDA INTELIGENTE
+   - Normaliza texto: quita acentos, convierte a minúsculas
+   - Busca por tokens: cada palabra de la query debe
+     aparecer en algún campo (orden no importa)
+   - Permite errores tipográficos leves (distancia ≤1)
+   - Prioriza coincidencias exactas y de materia sobre archivos
+════════════════════════════════════════════════════════ */
+const Search = (() => {
+  /** Quita tildes y pasa a minúsculas */
+  function norm(s) {
+    return String(s).toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9\s#]/g, " ")
+      .trim();
+  }
+
+  /** Distancia de Levenshtein simplificada (solo para palabras cortas) */
+  function levenshtein(a, b) {
+    if (Math.abs(a.length - b.length) > 2) return 99;
+    const m = a.length, n = b.length;
+    const dp = Array.from({length: m+1}, (_,i) => [i, ...Array(n).fill(0)]);
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++)
+      for (let j = 1; j <= n; j++)
+        dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    return dp[m][n];
+  }
+
+  /** ¿El token matchea contra alguna palabra del texto? */
+  function tokenMatchesText(token, textWords) {
+    // Coincidencia exacta parcial (substring)
+    if (textWords.some(w => w.includes(token) || token.includes(w))) return true;
+    // Tolerancia tipográfica para palabras largas (≥4 letras)
+    if (token.length >= 4) {
+      return textWords.some(w => w.length >= 3 && levenshtein(token, w) <= 1);
+    }
+    return false;
+  }
+
+  /**
+   * Puntúa qué tan bien matchea la query contra un ítem.
+   * Retorna un número mayor a 0 si hay match, 0 si no.
+   */
+  function score(item, tokens) {
+    const tituloNorm  = norm(item.titulo);
+    const materiaNorm = norm(item.materia);
+    const idStr       = String(item.mid);
+    const tituloWords  = tituloNorm.split(/\s+/);
+    const materiaWords = materiaNorm.split(/\s+/);
+    const allWords     = [...tituloWords, ...materiaWords];
+
+    // Búsqueda por código (#184 o solo el número)
+    const codeToken = tokens.find(t => /^#?\d+$/.test(t));
+    if (codeToken) {
+      const num = codeToken.replace("#", "");
+      if (idStr === num) return 100;
+      if (!tokens.filter(t => !/^#?\d+$/.test(t)).length) return 0;
+    }
+
+    // Cada token de la query debe matchear en algún campo
+    const allMatch = tokens
+      .filter(t => !/^#?\d+$/.test(t))
+      .every(t => tokenMatchesText(t, allWords));
+
+    if (!allMatch) return 0;
+
+    // Calcular puntaje de relevancia
+    let pts = 0;
+    tokens.filter(t => !/^#?\d+$/.test(t)).forEach(t => {
+      // Bonus por match en nombre de materia (más relevante)
+      if (materiaWords.some(w => w === t))           pts += 10;
+      else if (materiaWords.some(w => w.includes(t))) pts += 6;
+      else if (tokenMatchesText(t, materiaWords))     pts += 3;
+      // Match en título del archivo
+      if (tituloWords.some(w => w === t))             pts += 5;
+      else if (tituloWords.some(w => w.includes(t)))  pts += 3;
+      else if (tokenMatchesText(t, tituloWords))       pts += 1;
+    });
+
+    // Bonus extra si la query completa aparece literalmente en algún campo
+    const qFull = tokens.filter(t => !/^#?\d+$/.test(t)).join(" ");
+    if (materiaNorm.includes(qFull)) pts += 20;
+    if (tituloNorm.includes(qFull))  pts += 10;
+
+    return pts;
+  }
+
+  /** Tokeniza la query */
+  function tokenize(q) {
+    return norm(q).split(/\s+/).filter(t => t.length > 0);
+  }
+
+  /** Filtra y ordena por relevancia */
+  function query(items, rawQ) {
+    const tokens = tokenize(rawQ);
+    if (!tokens.length) return items;
+    return items
+      .map(r => ({ r, s: score(r, tokens) }))
+      .filter(x => x.s > 0)
+      .sort((a, b) => b.s - a.s)
+      .map(x => x.r);
+  }
+
+  return { query, norm };
+})();
+
 const Bib = (() => {
   const CATS = ["Todos","Apunte","Práctica","Libro"];
   let cat = "Todos";
@@ -685,17 +792,19 @@ const Bib = (() => {
     _clasificar: clasificar,
     buscar() {
       document.getElementById("live-results").style.display="none";
-      const q=document.getElementById("bib-input").value.trim().toLowerCase();
-      if(!q){render(filtered());return;}
-      render(getAll().filter(r => r.titulo.toLowerCase().includes(q)||r.materia.toLowerCase().includes(q)||String(r.mid).includes(q)||r.cat.toLowerCase().includes(q)));
+      const q = document.getElementById("bib-input").value.trim();
+      if (!q) { render(filtered()); return; }
+      render(Search.query(getAll(), q));
     },
     live() {
-      const q=document.getElementById("bib-input").value.trim().toLowerCase();
-      const wrap=document.getElementById("live-results");
-      if(q.length<2){wrap.style.display="none";return;}
-      const res=getAll().filter(r => r.titulo.toLowerCase().includes(q)||r.materia.toLowerCase().includes(q)||String(r.mid).includes(q)).slice(0,7);
-      wrap.innerHTML=res.length ? res.map(r => `<div class="live-item" onclick="Bib.pick('${r.uid}')"><span class="live-code">#${r.mid}</span><div><div class="live-name">${r.titulo}</div><div class="live-sub">${r.cat} · ${r.materia}</div></div></div>`).join("") : `<div class="no-live">Sin resultados para "${q}"</div>`;
-      wrap.style.display="block";
+      const q = document.getElementById("bib-input").value.trim();
+      const wrap = document.getElementById("live-results");
+      if (q.length < 2) { wrap.style.display="none"; return; }
+      const res = Search.query(getAll(), q).slice(0, 7);
+      wrap.innerHTML = res.length
+        ? res.map(r => `<div class="live-item" onclick="Bib.pick('${r.uid}')"><span class="live-code">#${r.mid}</span><div><div class="live-name">${r.titulo}</div><div class="live-sub">${r.cat} · ${r.materia}</div></div></div>`).join("")
+        : `<div class="no-live">Sin resultados para "${q}"</div>`;
+      wrap.style.display = "block";
     },
     pick(uid) { document.getElementById("live-results").style.display="none"; document.getElementById("bib-input").value=""; const r=getAll().find(x=>x.uid===uid); if(r) render([r]); }
   };
@@ -716,11 +825,13 @@ const HeroSearch = (() => {
   function scrollBib() { document.getElementById("biblioteca").scrollIntoView({ behavior:"smooth", block:"start" }); }
   return {
     live() {
-      const q = document.getElementById("hero-input").value.trim().toLowerCase();
+      const q = document.getElementById("hero-input").value.trim();
       const wrap = document.getElementById("hero-live");
       if (q.length < 2) { wrap.style.display="none"; return; }
-      const res = getAll().filter(r => r.titulo.toLowerCase().includes(q) || r.materia.toLowerCase().includes(q) || String(r.mid).includes(q)).slice(0,6);
-      wrap.innerHTML = res.length ? res.map(r => `<div class="hero-live-item" onclick="HeroSearch.pick('${r.uid}')"><span class="hero-live-code">#${r.mid}</span><div><div class="hero-live-name">${r.titulo}</div><div class="hero-live-sub">${r.cat} · ${r.materia}</div></div></div>`).join("") : `<div style="padding:14px;text-align:center;color:#6c757d;font-size:.86rem;">Sin resultados para "${q}"</div>`;
+      const res = Search.query(getAll(), q).slice(0, 6);
+      wrap.innerHTML = res.length
+        ? res.map(r => `<div class="hero-live-item" onclick="HeroSearch.pick('${r.uid}')"><span class="hero-live-code">#${r.mid}</span><div><div class="hero-live-name">${r.titulo}</div><div class="hero-live-sub">${r.cat} · ${r.materia}</div></div></div>`).join("")
+        : `<div style="padding:14px;text-align:center;color:#6c757d;font-size:.86rem;">Sin resultados para "${q}"</div>`;
       wrap.style.display = "block";
     },
     pick(uid) {
