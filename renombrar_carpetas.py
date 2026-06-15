@@ -1,6 +1,6 @@
 """
 renombrar_carpetas.py
-Se Ejecuta UNA SOLA VEZ en PythonAnywhere (consola Bash):
+Se Ejecuta UN SOLA VEZ en PythonAnywhere (consola Bash):
   python3 renombrar_carpetas.py
 
 Renombra carpetas dentro de static/materiales/ eliminando tildes y comas,
