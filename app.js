@@ -1,7 +1,5 @@
 'use strict';
-const API = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-  ? `http://${location.hostname}:5000`
-  : 'https://PortalUNAB.pythonanywhere.com';
+const API = 'https://PortalUNAB.pythonanywhere.com';
 
 class CarreraObj {
   constructor(id, nombre, tipo, pdfUrl, anios) {
